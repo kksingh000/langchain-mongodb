@@ -15,9 +15,12 @@ from langgraph.store.base import (
 )
 from pymongo import MongoClient
 
+from langchain_mongodb.embeddings import AutoEmbeddings
+
 from langgraph.store.mongodb import (
     MongoDBStore,
 )
+from langgraph.store.mongodb.base import create_vector_index_config
 
 MONGODB_URI = os.environ.get(
     "MONGODB_URI", "mongodb://localhost:27017?directConnection=true"
@@ -622,3 +625,64 @@ def test_upgrade_idempotent(legacy_collection) -> None:  # type: ignore[no-untyp
 
     assert docs_after_first == docs_after_second
     assert indexes_after_first == indexes_after_second
+
+
+def test_create_vector_index_config_autoembeddings_dims_none() -> None:
+    """Regression test for #389: create_vector_index_config should not raise
+    when embed is an AutoEmbeddings instance and dims is omitted/None, which
+    is exactly what the class's own docstring says to do."""
+    config = create_vector_index_config(
+        dims=None,
+        embed=AutoEmbeddings("voyage-4"),
+        fields=["question"],
+        filters=["target_tables"],
+    )
+    assert config["dims"] == -1
+    assert config["relevance_score_fn"] is None
+
+
+def test_create_vector_index_config_autoembeddings_explicit_none() -> None:
+    """Same as above, but with relevance_score_fn explicitly passed as None,
+    matching the first reproduction in #389."""
+    config = create_vector_index_config(
+        dims=None,
+        embed=AutoEmbeddings("voyage-4"),
+        fields=["question"],
+        filters=["target_tables"],
+        relevance_score_fn=None,
+    )
+    assert config["dims"] == -1
+    assert config["relevance_score_fn"] is None
+
+
+def test_create_vector_index_config_autoembeddings_rejects_conflicting_dims() -> None:
+    """A caller that explicitly sets dims/relevance_score_fn to values that
+    conflict with auto-embedding mode should still get a clear error."""
+    with pytest.raises(ValueError):
+        create_vector_index_config(
+            dims=1536,
+            embed=AutoEmbeddings("voyage-4"),
+            relevance_score_fn=None,
+        )
+
+
+def test_create_vector_index_config_regular_embedding_defaults_cosine() -> None:
+    """Non-autoembedding behavior is unchanged: relevance_score_fn still
+    defaults to cosine, and dims is still required."""
+
+    class _FakeEmbeddings:
+        def embed_documents(self, texts: list) -> list:
+            return [[0.0] for _ in texts]
+
+        def embed_query(self, text: str) -> list:
+            return [0.0]
+
+    config = create_vector_index_config(
+        dims=1536,
+        embed=_FakeEmbeddings(),  # type: ignore[arg-type]
+    )
+    assert config["dims"] == 1536
+    assert config["relevance_score_fn"] == "cosine"
+
+    with pytest.raises(ValueError):
+        create_vector_index_config(dims=None, embed=_FakeEmbeddings())  # type: ignore[arg-type]
