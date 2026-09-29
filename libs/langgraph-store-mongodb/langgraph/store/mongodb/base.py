@@ -138,23 +138,35 @@ class VectorIndexConfig(IndexConfig, total=False):
     """
 
 
+# Sentinel distinguishing "caller didn't pass relevance_score_fn" from an
+# explicit None (which has the specific meaning "auto-embedding mode").
+_UNSET: Any = object()
+
+
 def create_vector_index_config(
     dims: int | None,
     embed: Union[Embeddings, EmbeddingsFunc, AEmbeddingsFunc, str],
     fields: Optional[list[str]] = None,
     name: str = "vector_index",
-    relevance_score_fn: Literal["euclidean", "cosine", "dotProduct", None] = "cosine",
+    relevance_score_fn: Literal["euclidean", "cosine", "dotProduct", None] = _UNSET,
     embedding_key: str | None = "embedding",
     filters: Optional[list[str]] = None,
 ) -> VectorIndexConfig:
     """Factory function creates a VectorIndexConfig instance with sensible defaults.
 
     Args:
-        dims: Dimensions of the embedding vectors.
-        embed: Embedding model.
+        dims: Dimensions of the embedding vectors. Pass None when embed is an
+            AutoEmbeddings instance; it is normalized to the -1 sentinel that
+            Atlas auto-embedding indexes require.
+        embed: Embedding model. When this is an AutoEmbeddings instance, dims
+            and relevance_score_fn are normalized automatically so the index
+            is created in "auto-embedding" mode, matching Atlas's requirement
+            that dimensions be -1 and similarity be None in that mode.
         fields: Field to extract text from for embedding generation (list of length 1).
         name: Arbitrary name to give to the index in Atlas.
         relevance_score_fn: Function used to establish similarity of vectors.
+            Leave unset to get "cosine" for a regular embedding model, or None
+            automatically when embed is an AutoEmbeddings instance.
         embedding_key: Name of the field used in the collection to store vectors.
         filters: List of (possibly nested) fields to index allowing filtering.
 
@@ -164,6 +176,23 @@ def create_vector_index_config(
     MongoDBStore.ensure_index_filters(filters)
     if filters and "namespace_prefix" not in filters:
         filters.append("namespace_prefix")
+
+    is_autoembedding = isinstance(embed, AutoEmbeddings)
+    if relevance_score_fn is _UNSET:
+        relevance_score_fn = None if is_autoembedding else "cosine"
+    if is_autoembedding:
+        # Atlas auto-embedding indexes require dimensions == -1 and similarity
+        # (relevance_score_fn) == None; translate the natural dims=None into
+        # that sentinel instead of forcing every caller to know about -1.
+        if dims is None:
+            dims = -1
+        if dims != -1 or relevance_score_fn is not None:
+            raise ValueError(
+                "When embed is an AutoEmbeddings instance, dims must be None "
+                "(or -1) and relevance_score_fn must be None."
+            )
+    elif dims is None:
+        raise ValueError("dims is required unless embed is an AutoEmbeddings instance.")
 
     return VectorIndexConfig(
         dims=dims,
